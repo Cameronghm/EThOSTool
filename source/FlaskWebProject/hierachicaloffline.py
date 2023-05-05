@@ -1,0 +1,298 @@
+import os
+from os import listdir
+import numpy as np
+import pandas as pd
+from sklearn.cluster import AgglomerativeClustering  
+import matplotlib.pyplot as plt
+from os.path import isfile, join
+import pickle
+import getTag as groupsystem
+from tika import parser
+import string
+from pdf2image import convert_from_path, convert_from_bytes
+from PIL import Image
+from os import path
+import math
+import time
+import collections
+
+from shutil import copyfile
+from scipy.cluster.hierarchy import dendrogram
+from scipy.cluster import hierarchy
+
+import spacy
+first_run=0
+nlp = None
+
+# Paths (constants)
+SUMMARISED_PATH = 'database/summarised/'
+RAW_TEXT_PATH = 'database/raw_text/'
+PREVIEWS_PATH = 'database/previews/'
+DOWNLOADS_PATH = 'database/downloaded/'
+
+PDF_INPUT_PATH = 'static/PDF_Files_Input/'
+THUMBS_PATH = 'static/thumbs/'
+
+WORD_VECTOR_PATH = 'database/word_vectors/'
+NAMES_ORDER_PATH = 'database/name_orders.txt'
+
+download_folder = os.path.dirname(os.path.abspath(__file__)) + "database/downloaded"
+
+# Globals
+paper_queue = []
+stop_word = []
+stop_word_set = set()
+all_paper_names = set()
+
+
+papers_in_folder = {}
+
+paper_locations = {}
+
+
+changed_paper_names = {}
+
+summarised_papers = {}
+paper_previews = {}
+
+
+word_vector_names_order = []
+word_vector_matrix = []
+#File to hold the hierachical clustering search system
+
+# start by text summerisation as with the k means
+
+# then do a keyword search on the summerised documents (10 keywords then take the x documents with the most matches)
+
+# take these matching full texts then perform hierachical clustering on them 
+
+# present the user with the clustering tree as a series of decisions presented in a binary tree with at each depth the user picking the more relevant cluster based on firstly extracted keywords or if they want the sumerizations of each thesis
+
+# when the user is happy with the current group they then can 'check out and have their search completed'
+
+# Adding key weighting
+def key_search(keys):
+	path = 'database/summarised'
+	current = os.path.dirname(__file__)
+	path = os.path.join(current, path)
+	#print(path)
+	files = []
+	for file in os.listdir(path):
+		if file.endswith(".txt"):
+			files.append([file,0])
+	#print(files)
+	for x in range(0, len(keys)):
+		keys[x][0] = keys[x][0].upper()
+
+	for key in keys:
+		for file in files:
+			f = open(os.path.join(path, file[0]))
+			content = f.read().replace("\n", " ")
+			f.close()
+
+			#print(file)
+			#print(content)
+			content = content.upper()
+			#print(key)
+			#print(content.count(key[0]))
+			#print(file[1])
+			file[1] = file[1] + content.count(key[0]) * key[1] 
+	files = sorted(files, key=lambda x: x[1], reverse=True)
+	return files
+
+
+	# for each
+	# use grep in the summary txt files to return a list of tuples (filename, occurances)
+	# select x most common and return the list of tuples
+ 
+def get_all_filenames():
+    path = 'database/summarised'
+    current = os.path.dirname(__file__)
+    path = os.path.join(current, path)
+    #print(path)
+    files = []
+    for file in os.listdir(path):
+        if file.endswith(".txt"):
+            files.append([file,0])
+    print(files)
+    return files
+
+def plot_dendrogram(model,name_order, **kwargs):
+    # Create linkage matrix and then plot the dendrogram
+
+    # create the counts of samples under each node
+    counts = np.zeros(model.children_.shape[0])
+    n_samples = len(model.labels_)
+    for i, merge in enumerate(model.children_):
+        current_count = 0
+        for child_idx in merge:
+            if child_idx < n_samples:
+                current_count += 1  # leaf node
+            else:
+                current_count += counts[child_idx - n_samples]
+        counts[i] = current_count
+
+    linkage_matrix = np.column_stack(
+        [model.children_, model.distances_, counts]
+    ).astype(float)
+    print(linkage_matrix)
+    
+    # Plot the corresponding dendrogram
+    dendrogram(linkage_matrix, **kwargs)
+    return(linkage_matrix)
+
+def agglomerative_clustering(word_matrix, name_order, files):
+    print("create model")
+    model = AgglomerativeClustering(distance_threshold=0, n_clusters=None)
+    print("fit matrix to model")
+    print(word_matrix)
+    model = model.fit(word_matrix)
+    print("fitted")
+    print(model)
+
+    from scipy.cluster.hierarchy import dendrogram, linkage
+    #z = hierarchy.linkage(model.children_, 'ward')
+
+    #print(z)
+    #print(name_order)
+    
+    # plot the top three levels of the dendrogram
+    linkage = plot_dendrogram(model,name_order,labels=name_order,  leaf_rotation = 90)
+    tree = hierarchy.to_tree(linkage, rd=True)
+    tree_root = tree[0]
+    plt.xlabel("Number of points in node (or index of point if no parenthesis).")
+    plt.tight_layout()
+    plt.savefig("static/dendograms/den.png")
+    return(model, linkage, tree)
+
+def create_word_vectors():
+    global RAW_TEXT_PATH, WORD_VECTOR_PATH, NAMES_ORDER_PATH, all_paper_names, word_vector_names_order, word_vector_matrix
+    
+
+    matrix, names_order = groupsystem.create_word_matrix(all_paper_names, RAW_TEXT_PATH, WORD_VECTOR_PATH)
+
+    with open(NAMES_ORDER_PATH, 'w') as f:
+        for name in names_order:
+            f.write("%s\n" % name)
+    word_vector_names_order = names_order
+    word_vector_matrix = matrix
+
+def create_word_matrix(all_paper_names,RAW_TEXT_PATH, WORD_VECTOR_PATH):
+    global nlp
+    print("Creating word vectors...")
+    
+    print("Loading en_core_web_lg...")
+    if nlp == None:
+        nlp = spacy.load("en_core_web_lg")
+    print("Complete")
+    nlp.max_length = 2000000
+    matrix = []
+    names_order = []
+
+    count = 0
+    total = len(all_paper_names)
+
+    print("Calculating word vectors. (May take some time)")
+
+    for paper in all_paper_names:
+        paper = paper[0]
+
+
+        with open(RAW_TEXT_PATH + paper,'r') as f:  #, encoding="utf8"
+            text = f.read()
+            temp = nlp(text)
+
+
+
+            matrix.append(temp.vector)
+            names_order.append(paper)
+
+            #np.savetxt(WORD_VECTOR_PATH + str(count) + ".txt", temp.vector, delimiter=',')
+
+            count += 1
+            print(str(round(count*100/total)) + "%. Finished vectors for: ", paper)
+            
+
+    
+    matrix = np.array(matrix)
+    print("Finished creating word vectors.")
+    return matrix, names_order
+
+def generate_vector(files):
+	print('generate_vector')
+
+
+#method to return all the file names of theses in a given subcluster on the bst
+def get_child_leaf_names(tree_node, names_order):
+    leaves = tree_node.pre_order(lambda x: x.id)
+    labels = []
+    for leaf in leaves:
+        labels.append(names_order[leaf])
+    return labels
+
+
+
+
+
+def test():
+    print('test')
+
+def run_search(keys, first_run, breadth):
+    print(keys)
+    files = key_search(keys)
+    files = files[:breadth]
+    #print(files)
+    matrix =[]
+    names_order = []
+    if(first_run == 1):
+        matrix, names_order = create_word_matrix(files,'database/raw_text/', WORD_VECTOR_PATH)
+        print(matrix)
+        f_matrix = open('matrix.txt', 'wb')
+        f_names_order = open('names_order.txt', 'wb')
+        pickle.dump(names_order, f_names_order)
+        pickle.dump(matrix, f_matrix)
+        f_matrix.close()
+        f_names_order.close()
+    elif(first_run == 2):
+        whole_matrix = pickle.load(open("matrix.txt", 'rb'))
+        whole_names_order = pickle.load(open("names_order.txt", 'rb'))
+        matrix = []
+        names_order = []
+        for index in range(0,len(names_order)):
+            if whole_names_order[index] in files:
+                matrix.append[whole_matrix[index]]
+                names_order.append[whole_names_order[index]]
+        print(matrix,names_order)        
+    else:
+        matrix = pickle.load(open("matrix.txt", 'rb'))
+        names_order = pickle.load(open("names_order.txt", 'rb'))
+
+
+    print(names_order)
+
+    model, linkage, tree = agglomerative_clustering(matrix, names_order, files)
+    tree_root = tree[0]
+    #print(tree_root.get_left().pre_order(lambda x: x.id))
+
+    #print(get_child_leaf_names(tree_root.get_left(), names_order))
+    #print(names_order[tree_root.get_left().get_left().get_id()])
+    return(tree)
+    # now we have our bst
+    # need to implement the digging function
+
+
+def compute_full_matrix():
+    files = get_all_filenames()
+    print(len(files))
+    matrix, names_order = create_word_matrix(files,'database/raw_text/', WORD_VECTOR_PATH)
+
+    print(matrix)
+    f_matrix = open('matrix.txt', 'wb')
+    f_names_order = open('names_order.txt', 'wb')
+    pickle.dump(names_order, f_names_order)
+    pickle.dump(matrix, f_matrix)
+    f_matrix.close()
+    f_names_order.close()
+
+compute_full_matrix()
+
